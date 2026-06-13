@@ -67,7 +67,9 @@ func readMessage(r *bufio.Reader, maxBytes int) (message, error) {
 		return message{}, fmt.Errorf("LDAP message must be a sequence")
 	}
 	total := headerSizeForLength(length) + length
-	if total > maxBytes {
+	// length < 0 / total < 0 guard against int overflow on 32-bit platforms,
+	// where a 4-byte BER length can wrap negative and bypass the size cap.
+	if length < 0 || total < 0 || total > maxBytes {
 		return message{}, errRequestLarge
 	}
 	value := make([]byte, length)

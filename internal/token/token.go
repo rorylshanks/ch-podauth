@@ -43,13 +43,14 @@ type Validator interface {
 }
 
 type OIDCValidatorConfig struct {
-	Issuer       string
-	Audience     string
-	ClockSkew    time.Duration
-	JWKSTTL      time.Duration
-	HTTPTimeout  time.Duration
-	HTTPClient   *http.Client
-	MaxJWKSBytes int64
+	Issuer             string
+	Audience           string
+	ClockSkew          time.Duration
+	JWKSTTL            time.Duration
+	HTTPTimeout        time.Duration
+	HTTPClient         *http.Client
+	MaxJWKSBytes       int64
+	MinRefreshInterval time.Duration
 }
 
 type OIDCValidator struct {
@@ -60,6 +61,12 @@ type OIDCValidator struct {
 	jwksURI   string
 	keys      map[string]jwkKey
 	refreshed time.Time
+
+	// refreshMu single-flights network refreshes so concurrent unknown-kid
+	// binds cannot stampede the JWKS endpoint. lastRefreshAttempt (guarded by
+	// refreshMu) rate-limits forced refreshes.
+	refreshMu          sync.Mutex
+	lastRefreshAttempt time.Time
 }
 
 type jwkKey struct {
@@ -91,6 +98,9 @@ func NewOIDCValidator(cfg OIDCValidatorConfig) (*OIDCValidator, error) {
 	if cfg.MaxJWKSBytes == 0 {
 		cfg.MaxJWKSBytes = 1 << 20
 	}
+	if cfg.MinRefreshInterval == 0 {
+		cfg.MinRefreshInterval = 15 * time.Second
+	}
 
 	client := cfg.HTTPClient
 	if client == nil {
@@ -104,7 +114,32 @@ func NewOIDCValidator(cfg OIDCValidatorConfig) (*OIDCValidator, error) {
 	}, nil
 }
 
+// Refresh fetches the JWKS unconditionally. It is single-flighted: concurrent
+// callers are serialized so the JWKS endpoint is never hit more than once at a
+// time.
 func (v *OIDCValidator) Refresh(ctx context.Context) error {
+	v.refreshMu.Lock()
+	defer v.refreshMu.Unlock()
+	return v.doRefresh(ctx)
+}
+
+// forceRefresh refreshes the JWKS at most once per MinRefreshInterval. It backs
+// the unknown-kid path so attacker-chosen key ids cannot stampede the JWKS
+// endpoint, while still allowing genuine key rotation to be picked up promptly.
+func (v *OIDCValidator) forceRefresh(ctx context.Context) error {
+	v.refreshMu.Lock()
+	defer v.refreshMu.Unlock()
+	if !v.lastRefreshAttempt.IsZero() && time.Since(v.lastRefreshAttempt) < v.cfg.MinRefreshInterval {
+		return nil
+	}
+	return v.doRefresh(ctx)
+}
+
+// doRefresh performs the actual discovery + JWKS fetch and swaps in the new key
+// set. Callers must hold refreshMu.
+func (v *OIDCValidator) doRefresh(ctx context.Context) error {
+	v.lastRefreshAttempt = time.Now()
+
 	ctx, cancel := context.WithTimeout(ctx, v.cfg.HTTPTimeout)
 	defer cancel()
 
@@ -121,6 +156,9 @@ func (v *OIDCValidator) Refresh(ctx context.Context) error {
 	}
 	if discovery.JWKSURI == "" {
 		return errors.New("discovery document missing jwks_uri")
+	}
+	if err := v.checkJWKSURI(discovery.JWKSURI); err != nil {
+		return err
 	}
 
 	var raw rawJWKS
@@ -140,6 +178,24 @@ func (v *OIDCValidator) Refresh(ctx context.Context) error {
 	v.jwksURI = discovery.JWKSURI
 	v.keys = keys
 	v.refreshed = time.Now()
+	return nil
+}
+
+// checkJWKSURI pins the jwks_uri to the configured issuer's scheme and host so a
+// tampered discovery document cannot redirect the key fetch to an arbitrary host
+// (SSRF / key substitution).
+func (v *OIDCValidator) checkJWKSURI(jwksURI string) error {
+	issuerURL, err := url.Parse(v.cfg.Issuer)
+	if err != nil {
+		return fmt.Errorf("parse issuer URL: %w", err)
+	}
+	parsed, err := url.Parse(jwksURI)
+	if err != nil {
+		return fmt.Errorf("parse jwks_uri: %w", err)
+	}
+	if parsed.Scheme != issuerURL.Scheme || parsed.Host != issuerURL.Host {
+		return fmt.Errorf("jwks_uri %q does not share the issuer scheme/host %q", jwksURI, v.cfg.Issuer)
+	}
 	return nil
 }
 
@@ -200,8 +256,10 @@ func (v *OIDCValidator) keyFor(ctx context.Context, kid string) (jwkKey, error) 
 		return key, nil
 	}
 
-	// Refresh once on unknown kid so key rotation can succeed without waiting for the TTL.
-	if err := v.Refresh(ctx); err != nil {
+	// Unknown kid: force a rate-limited refresh so genuine key rotation succeeds
+	// without waiting for the TTL, while attacker-chosen kids cannot stampede the
+	// JWKS endpoint.
+	if err := v.forceRefresh(ctx); err != nil {
 		return jwkKey{}, err
 	}
 	if key, ok := v.lookupKey(kid); ok {
@@ -213,11 +271,20 @@ func (v *OIDCValidator) keyFor(ctx context.Context, kid string) (jwkKey, error) 
 func (v *OIDCValidator) refreshIfStale(ctx context.Context) error {
 	v.mu.RLock()
 	refreshed := v.refreshed
+	hasKeys := len(v.keys) > 0
 	v.mu.RUnlock()
 	if !refreshed.IsZero() && time.Since(refreshed) < v.cfg.JWKSTTL {
 		return nil
 	}
-	return v.Refresh(ctx)
+	if err := v.forceRefresh(ctx); err != nil {
+		// Serve the last-known-good key set when a refresh fails so a transient
+		// OIDC outage does not take down authentication.
+		if hasKeys {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (v *OIDCValidator) lookupKey(kid string) (jwkKey, bool) {
@@ -381,7 +448,9 @@ func parseJWKS(raw rawJWKS) (map[string]jwkKey, error) {
 		}
 		parsed, err := parseJWK(key)
 		if err != nil {
-			return nil, fmt.Errorf("parse JWK %q: %w", key.KID, err)
+			// Skip keys we cannot parse (e.g. an unsupported curve) so a single
+			// bad key does not break validation for every other key.
+			continue
 		}
 		if parsed.PublicKey != nil {
 			keys[parsed.KID] = parsed

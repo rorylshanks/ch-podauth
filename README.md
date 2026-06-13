@@ -13,7 +13,7 @@ It is intentionally not a general LDAP directory. It implements enough LDAP to a
 5. `ch-podauth` authorizes `namespace/serviceAccount -> ClickHouse username`.
 6. LDAP bind success is returned only when validation and authorization both pass.
 
-The service is stateless except for its JWKS cache. It fetches the issuer discovery document, caches JWKS keys, refreshes on TTL, and refreshes once immediately on an unknown `kid` to handle key rotation.
+The service is stateless except for its JWKS cache. It fetches the issuer discovery document, caches JWKS keys, and refreshes them in the background on TTL. On an unknown `kid` it triggers a single refresh so key rotation is picked up without waiting for the TTL; these forced refreshes are single-flighted and rate-limited (`oidc.min_refresh_interval`) so attacker-chosen key ids cannot stampede the JWKS endpoint. If a refresh fails, the last-known-good keys continue to be served so a transient OIDC outage does not take down authentication. The `jwks_uri` advertised by discovery is pinned to the configured issuer's scheme and host.
 
 The validation package is isolated behind a `token.Validator` interface so a future Kubernetes TokenReview validator can be added without changing the LDAP server.
 
@@ -130,7 +130,8 @@ The JWT must contain Kubernetes pod-bound claims under `kubernetes.io`, includin
 - It rejects missing or unexpected issuer and audience claims.
 - It requires normal JWT validity checks: signature, `exp`, `nbf`, and future `iat` handling.
 - It requires pod-bound projected ServiceAccount identity claims.
-- It rejects oversized LDAP requests and oversized bind credentials.
+- It rejects oversized LDAP requests and oversized bind credentials, and bounds the number of concurrent LDAP connections (`ldap.max_connections`).
+- It pins the discovery `jwks_uri` to the issuer host and rate-limits forced JWKS refreshes to avoid amplification against the OIDC endpoint.
 - It never logs the JWT or bind password.
 - Logs may include namespace, service account, pod name, ClickHouse username, decision, and a short SHA-256 token fingerprint.
 - It does not call the Kubernetes API in this version, so it does not prove current pod liveness after token issuance.

@@ -2,6 +2,7 @@ ldap:
   listen_addr: "127.0.0.1:1389"
   max_request_bytes: 131072
   max_credential_bytes: 32768
+  max_connections: 256
   read_timeout: "5s"
   write_timeout: "5s"
 
@@ -16,6 +17,7 @@ oidc:
   jwks_ttl: "10m"
   http_timeout: "5s"
   max_jwks_bytes: 1048576
+  min_refresh_interval: "15s"
 
 logging:
   level: "info"

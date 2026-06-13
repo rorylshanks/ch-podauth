@@ -18,6 +18,7 @@ type Config struct {
 	ListenAddr         string
 	MaxRequestBytes    int
 	MaxCredentialBytes int
+	MaxConnections     int
 	ReadTimeout        time.Duration
 	WriteTimeout       time.Duration
 }
@@ -30,6 +31,7 @@ type Server struct {
 
 	listener net.Listener
 	wg       sync.WaitGroup
+	sem      chan struct{}
 }
 
 func New(cfg Config, authService *auth.Service, logger *slog.Logger, metrics *metrics.Metrics) (*Server, error) {
@@ -41,6 +43,9 @@ func New(cfg Config, authService *auth.Service, logger *slog.Logger, metrics *me
 	}
 	if cfg.MaxCredentialBytes == 0 {
 		cfg.MaxCredentialBytes = 32 * 1024
+	}
+	if cfg.MaxConnections == 0 {
+		cfg.MaxConnections = 256
 	}
 	if cfg.ReadTimeout == 0 {
 		cfg.ReadTimeout = 5 * time.Second
@@ -59,6 +64,7 @@ func New(cfg Config, authService *auth.Service, logger *slog.Logger, metrics *me
 		auth:    authService,
 		logger:  logger,
 		metrics: metrics,
+		sem:     make(chan struct{}, cfg.MaxConnections),
 	}, nil
 }
 
@@ -85,9 +91,22 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 			s.logger.Error("accept ldap connection", "error", err)
 			continue
 		}
+		// Bound concurrent connections so an unbounded number of clients cannot
+		// exhaust goroutines/file descriptors. Reject quickly when at capacity.
+		select {
+		case s.sem <- struct{}{}:
+		default:
+			if s.metrics != nil {
+				s.metrics.ObserveConnectionRejected()
+			}
+			s.logger.Warn("ldap connection rejected", "reason", "max_connections", "remote", conn.RemoteAddr().String())
+			_ = conn.Close()
+			continue
+		}
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
+			defer func() { <-s.sem }()
 			s.handleConnection(ctx, conn)
 		}()
 	}

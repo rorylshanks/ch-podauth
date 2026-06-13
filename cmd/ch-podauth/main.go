@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/rorylshanks/ch-podauth/internal/auth"
 	"github.com/rorylshanks/ch-podauth/internal/config"
@@ -43,12 +44,13 @@ func run() error {
 
 	metricSet := metrics.New()
 	validator, err := token.NewOIDCValidator(token.OIDCValidatorConfig{
-		Issuer:       cfg.OIDC.Issuer,
-		Audience:     cfg.OIDC.Audience,
-		ClockSkew:    cfg.OIDC.ClockSkew.Duration,
-		JWKSTTL:      cfg.OIDC.JWKSTTL.Duration,
-		HTTPTimeout:  cfg.OIDC.HTTPTimeout.Duration,
-		MaxJWKSBytes: cfg.OIDC.MaxJWKSBytes,
+		Issuer:             cfg.OIDC.Issuer,
+		Audience:           cfg.OIDC.Audience,
+		ClockSkew:          cfg.OIDC.ClockSkew.Duration,
+		JWKSTTL:            cfg.OIDC.JWKSTTL.Duration,
+		HTTPTimeout:        cfg.OIDC.HTTPTimeout.Duration,
+		MaxJWKSBytes:       cfg.OIDC.MaxJWKSBytes,
+		MinRefreshInterval: cfg.OIDC.MinRefreshInterval.Duration,
 	})
 	if err != nil {
 		return err
@@ -62,6 +64,10 @@ func run() error {
 	}
 	logger.Info("initial JWKS refresh complete")
 
+	// Refresh the JWKS in the background so key material stays warm and the
+	// request path does not have to block on a network fetch after the TTL.
+	go refreshJWKSPeriodically(ctx, validator, cfg.OIDC.JWKSTTL.Duration, logger)
+
 	authService, err := auth.NewService(validator, cfg.AuthMappings(), logger, metricSet)
 	if err != nil {
 		return err
@@ -70,6 +76,7 @@ func run() error {
 		ListenAddr:         cfg.LDAP.ListenAddr,
 		MaxRequestBytes:    cfg.LDAP.MaxRequestBytes,
 		MaxCredentialBytes: cfg.LDAP.MaxCredentialBytes,
+		MaxConnections:     cfg.LDAP.MaxConnections,
 		ReadTimeout:        cfg.LDAP.ReadTimeout.Duration,
 		WriteTimeout:       cfg.LDAP.WriteTimeout.Duration,
 	}, authService, logger, metricSet)
@@ -109,6 +116,24 @@ func run() error {
 			return err
 		}
 		return nil
+	}
+}
+
+func refreshJWKSPeriodically(ctx context.Context, validator *token.OIDCValidator, ttl time.Duration, logger *slog.Logger) {
+	if ttl <= 0 {
+		return
+	}
+	ticker := time.NewTicker(ttl)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := validator.Refresh(ctx); err != nil {
+				logger.Warn("background JWKS refresh failed", "error", err)
+			}
+		}
 	}
 }
 

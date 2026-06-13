@@ -26,6 +26,7 @@ type LDAPConfig struct {
 	ListenAddr         string   `yaml:"listen_addr" json:"listen_addr"`
 	MaxRequestBytes    int      `yaml:"max_request_bytes" json:"max_request_bytes"`
 	MaxCredentialBytes int      `yaml:"max_credential_bytes" json:"max_credential_bytes"`
+	MaxConnections     int      `yaml:"max_connections" json:"max_connections"`
 	ReadTimeout        Duration `yaml:"read_timeout" json:"read_timeout"`
 	WriteTimeout       Duration `yaml:"write_timeout" json:"write_timeout"`
 }
@@ -36,12 +37,13 @@ type HTTPConfig struct {
 }
 
 type OIDCConfig struct {
-	Issuer       string   `yaml:"issuer" json:"issuer"`
-	Audience     string   `yaml:"audience" json:"audience"`
-	ClockSkew    Duration `yaml:"clock_skew" json:"clock_skew"`
-	JWKSTTL      Duration `yaml:"jwks_ttl" json:"jwks_ttl"`
-	HTTPTimeout  Duration `yaml:"http_timeout" json:"http_timeout"`
-	MaxJWKSBytes int64    `yaml:"max_jwks_bytes" json:"max_jwks_bytes"`
+	Issuer             string   `yaml:"issuer" json:"issuer"`
+	Audience           string   `yaml:"audience" json:"audience"`
+	ClockSkew          Duration `yaml:"clock_skew" json:"clock_skew"`
+	JWKSTTL            Duration `yaml:"jwks_ttl" json:"jwks_ttl"`
+	HTTPTimeout        Duration `yaml:"http_timeout" json:"http_timeout"`
+	MaxJWKSBytes       int64    `yaml:"max_jwks_bytes" json:"max_jwks_bytes"`
+	MinRefreshInterval Duration `yaml:"min_refresh_interval" json:"min_refresh_interval"`
 }
 
 type LoggingConfig struct {
@@ -65,6 +67,7 @@ func Default() Config {
 			ListenAddr:         "127.0.0.1:1389",
 			MaxRequestBytes:    128 * 1024,
 			MaxCredentialBytes: 32 * 1024,
+			MaxConnections:     256,
 			ReadTimeout:        Duration{5 * time.Second},
 			WriteTimeout:       Duration{5 * time.Second},
 		},
@@ -73,11 +76,12 @@ func Default() Config {
 			Timeout:    Duration{5 * time.Second},
 		},
 		OIDC: OIDCConfig{
-			Audience:     "clickhouse-auth",
-			ClockSkew:    Duration{30 * time.Second},
-			JWKSTTL:      Duration{10 * time.Minute},
-			HTTPTimeout:  Duration{5 * time.Second},
-			MaxJWKSBytes: 1 << 20,
+			Audience:           "clickhouse-auth",
+			ClockSkew:          Duration{30 * time.Second},
+			JWKSTTL:            Duration{10 * time.Minute},
+			HTTPTimeout:        Duration{5 * time.Second},
+			MaxJWKSBytes:       1 << 20,
+			MinRefreshInterval: Duration{15 * time.Second},
 		},
 		Logging: LoggingConfig{
 			Level:  "info",
@@ -133,8 +137,14 @@ func (c Config) Validate() error {
 	if c.LDAP.MaxCredentialBytes > c.LDAP.MaxRequestBytes {
 		return errors.New("ldap.max_credential_bytes cannot exceed ldap.max_request_bytes")
 	}
+	if c.LDAP.MaxConnections <= 0 {
+		return errors.New("ldap.max_connections must be positive")
+	}
 	if c.OIDC.ClockSkew.Duration < 0 || c.OIDC.JWKSTTL.Duration <= 0 || c.OIDC.HTTPTimeout.Duration <= 0 {
 		return errors.New("oidc durations must be positive, except clock_skew may be zero")
+	}
+	if c.OIDC.MinRefreshInterval.Duration < 0 {
+		return errors.New("oidc.min_refresh_interval cannot be negative")
 	}
 	if c.OIDC.MaxJWKSBytes <= 0 {
 		return errors.New("oidc.max_jwks_bytes must be positive")
@@ -216,6 +226,9 @@ func applyEnv(cfg *Config) error {
 	if err := overrideInt(&cfg.LDAP.MaxCredentialBytes, "CH_PODAUTH_LDAP_MAX_CREDENTIAL_BYTES"); err != nil {
 		return err
 	}
+	if err := overrideInt(&cfg.LDAP.MaxConnections, "CH_PODAUTH_LDAP_MAX_CONNECTIONS"); err != nil {
+		return err
+	}
 	if err := overrideDuration(&cfg.LDAP.ReadTimeout, "CH_PODAUTH_LDAP_READ_TIMEOUT"); err != nil {
 		return err
 	}
@@ -240,6 +253,9 @@ func applyEnv(cfg *Config) error {
 		return err
 	}
 	if err := overrideInt64(&cfg.OIDC.MaxJWKSBytes, "CH_PODAUTH_MAX_JWKS_BYTES"); err != nil {
+		return err
+	}
+	if err := overrideDuration(&cfg.OIDC.MinRefreshInterval, "CH_PODAUTH_MIN_REFRESH_INTERVAL"); err != nil {
 		return err
 	}
 

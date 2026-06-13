@@ -10,13 +10,14 @@ import (
 )
 
 type Metrics struct {
-	bindsTotal         atomic.Uint64
-	bindsSuccess       atomic.Uint64
-	bindsFailure       atomic.Uint64
-	requestTooLarge    atomic.Uint64
-	protocolErrors     atomic.Uint64
-	reasonMu           sync.RWMutex
-	bindFailureReasons map[string]uint64
+	bindsTotal          atomic.Uint64
+	bindsSuccess        atomic.Uint64
+	bindsFailure        atomic.Uint64
+	requestTooLarge     atomic.Uint64
+	protocolErrors      atomic.Uint64
+	connectionsRejected atomic.Uint64
+	reasonMu            sync.RWMutex
+	bindFailureReasons  map[string]uint64
 }
 
 func New() *Metrics {
@@ -48,6 +49,10 @@ func (m *Metrics) ObserveProtocolError() {
 	m.protocolErrors.Add(1)
 }
 
+func (m *Metrics) ObserveConnectionRejected() {
+	m.connectionsRejected.Add(1)
+}
+
 func (m *Metrics) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
@@ -61,6 +66,8 @@ func (m *Metrics) Handler() http.Handler {
 		fmt.Fprintf(w, "ch_podauth_ldap_request_too_large_total %d\n", m.requestTooLarge.Load())
 		fmt.Fprintf(w, "# TYPE ch_podauth_ldap_protocol_errors_total counter\n")
 		fmt.Fprintf(w, "ch_podauth_ldap_protocol_errors_total %d\n", m.protocolErrors.Load())
+		fmt.Fprintf(w, "# TYPE ch_podauth_ldap_connections_rejected_total counter\n")
+		fmt.Fprintf(w, "ch_podauth_ldap_connections_rejected_total %d\n", m.connectionsRejected.Load())
 
 		reasons := m.failureReasons()
 		if len(reasons) > 0 {
