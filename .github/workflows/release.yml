@@ -1,0 +1,76 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run unit tests
+        run: go test ./...
+      - name: Run ClickHouse e2e test
+        run: go test -tags=e2e ./e2e -run TestClickHouseLDAPBridge -count=1 -v
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      matrix:
+        goos: [linux]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build ch-podauth
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          bin_name="ch-podauth-${GOOS}-${GOARCH}"
+          go build -trimpath -ldflags="-s -w" -o "dist/${bin_name}" ./cmd/ch-podauth
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ch-podauth-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve version
+        id: version
+        run: |
+          git fetch origin main --depth=1
+          echo "version=$(git rev-parse --short origin/main)" >> "$GITHUB_OUTPUT"
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ch-podauth ${{ steps.version.outputs.version }}
+          files: dist/**/ch-podauth-*

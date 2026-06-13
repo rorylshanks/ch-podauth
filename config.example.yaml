@@ -1,0 +1,33 @@
+ldap:
+  listen_addr: "127.0.0.1:1389"
+  max_request_bytes: 131072
+  max_credential_bytes: 32768
+  read_timeout: "5s"
+  write_timeout: "5s"
+
+http:
+  listen_addr: "127.0.0.1:8080"
+  timeout: "5s"
+
+oidc:
+  issuer: "https://oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE"
+  audience: "clickhouse-auth"
+  clock_skew: "30s"
+  jwks_ttl: "10m"
+  http_timeout: "5s"
+  max_jwks_bytes: 1048576
+
+logging:
+  level: "info"
+  format: "json"
+
+mappings:
+  - namespace: "analytics"
+    service_account: "clickhouse-reader"
+    clickhouse_users:
+      - "reader"
+      - "readonly"
+  - namespace: "analytics"
+    service_account: "clickhouse-writer"
+    clickhouse_users:
+      - "writer"

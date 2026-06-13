@@ -1,0 +1,7 @@
+.git
+ch-podauth
+*.test
+*.out
+coverage.*
+profile.cov
+.env
