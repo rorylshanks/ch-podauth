@@ -51,7 +51,32 @@ Mappings can also be supplied as JSON:
 CH_PODAUTH_MAPPINGS='[{"namespace":"analytics","service_account":"clickhouse-reader","clickhouse_users":["reader"]}]'
 ```
 
-Metrics are exposed at `/metrics`; health is exposed at `/healthz`.
+## HTTP Endpoints
+
+The HTTP listener (`http.listen_addr`, default `127.0.0.1:8080`) serves two routes:
+
+- `GET /healthz` — liveness/readiness probe, returns `200 ok`.
+- `GET /metrics` — Prometheus metrics (via `prometheus/client_golang`).
+
+Exported metrics include:
+
+| Metric | Type | Notes |
+| --- | --- | --- |
+| `ch_podauth_ldap_binds_total` | counter | All bind attempts. |
+| `ch_podauth_ldap_bind_success_total` | counter | Authenticated and authorized binds. |
+| `ch_podauth_ldap_bind_failure_total` | counter | Denied binds. |
+| `ch_podauth_ldap_bind_failures_by_reason_total` | counter | Denials by `reason` label. |
+| `ch_podauth_bind_duration_seconds` | histogram | Bind authentication latency (token validation + authz). |
+| `ch_podauth_ldap_request_too_large_total` | counter | Requests/credentials over the size limits. |
+| `ch_podauth_ldap_protocol_errors_total` | counter | Unparseable LDAP requests. |
+| `ch_podauth_ldap_connections_rejected_total` | counter | Connections rejected at the concurrency limit. |
+| `ch_podauth_active_connections` | gauge | LDAP connections currently served. |
+| `ch_podauth_max_connections` | gauge | Configured connection limit. |
+| `ch_podauth_jwks_refresh_total` | counter | JWKS refreshes by `result` (success/failure). |
+| `ch_podauth_jwks_last_success_timestamp_seconds` | gauge | Time of the last successful refresh. |
+| `ch_podauth_jwks_keys` | gauge | Usable keys currently cached. |
+
+Standard `go_*` and `process_*` runtime metrics are exported as well.
 
 ## ClickHouse Config
 

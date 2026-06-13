@@ -42,6 +42,12 @@ type Validator interface {
 	Validate(ctx context.Context, rawToken string) (Identity, error)
 }
 
+// RefreshObserver is notified of JWKS refresh outcomes so callers can export
+// metrics without coupling this package to a metrics implementation.
+type RefreshObserver interface {
+	ObserveJWKSRefresh(success bool, keyCount int)
+}
+
 type OIDCValidatorConfig struct {
 	Issuer             string
 	Audience           string
@@ -51,6 +57,7 @@ type OIDCValidatorConfig struct {
 	HTTPClient         *http.Client
 	MaxJWKSBytes       int64
 	MinRefreshInterval time.Duration
+	Observer           RefreshObserver
 }
 
 type OIDCValidator struct {
@@ -137,8 +144,16 @@ func (v *OIDCValidator) forceRefresh(ctx context.Context) error {
 
 // doRefresh performs the actual discovery + JWKS fetch and swaps in the new key
 // set. Callers must hold refreshMu.
-func (v *OIDCValidator) doRefresh(ctx context.Context) error {
+func (v *OIDCValidator) doRefresh(ctx context.Context) (err error) {
 	v.lastRefreshAttempt = time.Now()
+
+	if v.cfg.Observer != nil {
+		defer func() {
+			if err != nil {
+				v.cfg.Observer.ObserveJWKSRefresh(false, 0)
+			}
+		}()
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, v.cfg.HTTPTimeout)
 	defer cancel()
@@ -174,10 +189,14 @@ func (v *OIDCValidator) doRefresh(ctx context.Context) error {
 	}
 
 	v.mu.Lock()
-	defer v.mu.Unlock()
 	v.jwksURI = discovery.JWKSURI
 	v.keys = keys
 	v.refreshed = time.Now()
+	v.mu.Unlock()
+
+	if v.cfg.Observer != nil {
+		v.cfg.Observer.ObserveJWKSRefresh(true, len(keys))
+	}
 	return nil
 }
 

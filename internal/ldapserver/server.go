@@ -59,6 +59,9 @@ func New(cfg Config, authService *auth.Service, logger *slog.Logger, metrics *me
 	if logger == nil {
 		logger = slog.Default()
 	}
+	if metrics != nil {
+		metrics.SetMaxConnections(cfg.MaxConnections)
+	}
 	return &Server{
 		cfg:     cfg,
 		auth:    authService,
@@ -121,6 +124,10 @@ func (s *Server) Addr() net.Addr {
 
 func (s *Server) handleConnection(parent context.Context, conn net.Conn) {
 	defer conn.Close()
+	if s.metrics != nil {
+		s.metrics.IncActiveConnections()
+		defer s.metrics.DecActiveConnections()
+	}
 	remote := conn.RemoteAddr().String()
 	reader := bufio.NewReaderSize(conn, min(s.cfg.MaxRequestBytes, 64*1024))
 
@@ -178,7 +185,11 @@ func (s *Server) handleBind(parent context.Context, conn net.Conn, messageID int
 
 	ctx, cancel := context.WithTimeout(parent, s.cfg.ReadTimeout)
 	defer cancel()
+	start := time.Now()
 	decision := s.auth.Authenticate(ctx, req.Username, req.Password)
+	if s.metrics != nil {
+		s.metrics.ObserveBindDuration(time.Since(start).Seconds())
+	}
 	if decision.Allowed {
 		s.writeResponse(conn, encodeLDAPBindResponse(messageID, ldapResultSuccess, ""))
 		return

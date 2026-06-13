@@ -51,6 +51,7 @@ func run() error {
 		HTTPTimeout:        cfg.OIDC.HTTPTimeout.Duration,
 		MaxJWKSBytes:       cfg.OIDC.MaxJWKSBytes,
 		MinRefreshInterval: cfg.OIDC.MinRefreshInterval.Duration,
+		Observer:           metricSet,
 	})
 	if err != nil {
 		return err
